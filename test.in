@@ -1,0 +1,6 @@
+Input lines:
+a = 5
+b = 10
+c = a + b * 2
+c / 0
+d = c % 3
