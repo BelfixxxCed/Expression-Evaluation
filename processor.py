@@ -1,26 +1,56 @@
+import lab1
+
 def process_code(lines: list[str]) -> str:
     """
-    Processes the input lines and returns the evaluated output.
-    
-    This is a stub function. Other group members will implement 
-    the infix-to-postfix conversion and expression evaluation here.
+    Processes the input lines by delegating to lab1 logic 
+    and formats the evaluated output for the GUI.
     """
-    # A dummy response based on the assignment output specification
+    variables = {}
+    errors = []
     output = []
-    for i, line in enumerate(lines, 1):
+    
+    for line in lines:
         if not line.strip():
             continue
+            
         output.append(f"Line: {line}")
-        output.append(f"Postfix: postfix{i}")
-        output.append(f"Result: result{i}")
+        
+        try:
+            postfix, result = lab1.process_line(line, variables)
+            
+            # Formating postfix tokens to string
+            postfix_str = " ".join(postfix)
+            output.append(f"Postfix: {postfix_str}")
+            
+            # Formatting the result
+            if "=" in line:
+                target = line.split("=")[0].strip()
+                output.append(f"Result: {target} = {result}")
+            else:
+                output.append(f"Result: {result}")
+                
+        except (ValueError, ZeroDivisionError) as e:
+            # According to standard assignment format, record the error
+            errors.append(str(e))
+            output.append("Postfix: ERROR")
+            output.append("Result: ERROR")
+            
         output.append("")
-    
+        
     output.append("-" * 43)
     output.append("Variables used:")
-    output.append("Var1")
-    output.append("Var2")
+    if variables:
+        for var, val in variables.items():
+            output.append(f"{var}: {val}")
+    else:
+        output.append("None")
+        
     output.append("-" * 43)
     output.append("Errors found:")
-    output.append("Undefined variable Var2")
-    
+    if errors:
+        for err in errors:
+            output.append(err)
+    else:
+        output.append("None")
+        
     return "\n".join(output)
