@@ -1,407 +1,634 @@
-# this program processes mathematical expressions and assignment statements.
-# it separates an expression into tokens, converts the infix expression
-# into postfix notation, evaluates the postfix expression, and stores
-# the values of assigned variables for later use.
-#
-# supported operators:
-# + for addition
-# - for subtraction
-# * for multiplication
-# / for division
-# % for modulo
-#
-# the program also handles parentheses, decimal values, variables,
-# undefined variables, invalid expressions, mismatched parentheses,
-# and division or modulo by zero.
+"""
+Programming Exercise 00: Expression Evaluation
+Course: CMSC 129
+
+This program implements an expression evaluator with a graphical user interface (UI).
+It evaluates mathematical expressions and assignment statements line-by-line:
+1. Tokenizes expressions (supporting C-style variable names without underscores,
+   integers/decimals, operators +, -, *, /, %, and parentheses).
+2. Converts infix expressions to postfix notation using the Shunting-yard algorithm.
+3. Evaluates postfix expressions using a stack while tracking variable assignments.
+4. Identifies and reports errors (Invalid input code, Undefined variable, Division by zero).
+5. Displays results, variables used with their final values, and all errors encountered.
+"""
+
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from collections import OrderedDict
 
 
-# processes an expression character by character and groups
-# numbers and variable names into tokens while separating
-# operators and parentheses.
-def get_tokens(expression):
-    # this list stores all the tokens found in the expression.
+# ==============================================================================
+# CUSTOM EXCEPTIONS FOR SPECIFIED ERROR TYPES
+# ==============================================================================
+
+class InvalidCodeException(Exception):
+    """Raised when an input statement or expression is syntactically or lexically invalid."""
+    pass
+
+
+class UndefinedVariableException(Exception):
+    """Raised when a variable is evaluated before being assigned any value."""
+    def __init__(self, variable_name: str):
+        self.variable_name = variable_name
+        super().__init__(f"Undefined variable {variable_name}")
+
+
+class DivisionByZeroException(Exception):
+    """Raised when a division or modulo by zero is attempted."""
+    def __init__(self):
+        super().__init__("Division by zero")
+
+
+# ==============================================================================
+# TOKEN DEFINITIONS AND TOKENIZER
+# ==============================================================================
+
+class TokenType:
+    NUMBER = "NUMBER"
+    VARIABLE = "VARIABLE"
+    OPERATOR = "OPERATOR"
+    UNARY_MINUS = "UNARY_MINUS"
+    LPAREN = "LPAREN"
+    RPAREN = "RPAREN"
+
+
+class Token:
+    """Represents a lexical token with a type and text value."""
+    __slots__ = ("type", "text")
+
+    def __init__(self, token_type: str, text: str):
+        self.type = token_type
+        self.text = text
+
+    def display_text(self) -> str:
+        """Returns the text representation for display in postfix notation."""
+        if self.type == TokenType.UNARY_MINUS:
+            return "u-"
+        return self.text
+
+    def __repr__(self):
+        return f"Token({self.type}, {self.text!r})"
+
+
+def is_valid_variable_name(name: str) -> bool:
+    """
+    Validates variable names according to C language rules:
+    - Excludes the underscore symbol.
+    - Excludes the restriction on keywords (keywords are permitted as variable names).
+    Therefore, the name must start with an alphabetic letter and contain only letters and digits.
+    """
+    if not name:
+        return False
+    if not name[0].isalpha():
+        return False
+    return name.isalnum()
+
+
+def get_tokens(expression: str) -> list:
+    """
+    Scans and tokenizes an infix expression into a list of Token objects.
+    Enforces lexical rules and checks for illegal characters.
+    """
     tokens = []
+    i = 0
+    n = len(expression)
 
-    # this temporary string is used to build a number
-    # or variable name one character at a time.
-    current = ""
+    while i < n:
+        char = expression[i]
 
-    # read the expression one character at a time.
-    for char in expression:
+        # Ignore whitespace
+        if char.isspace():
+            i += 1
+            continue
 
-        # add letters, numbers, and decimal points to the
-        # current token so multi-character values and variables
-        # are treated as one token.
-        if char.isalnum() or char == ".":
-            current += char
+        # Opening parenthesis
+        if char == "(":
+            tokens.append(Token(TokenType.LPAREN, "("))
+            i += 1
+            continue
 
-        # check if the character is a supported operator
-        # or a parenthesis.
-        elif char in "+-*/%()":
+        # Closing parenthesis
+        if char == ")":
+            tokens.append(Token(TokenType.RPAREN, ")"))
+            i += 1
+            continue
 
-            # save the current number or variable before
-            # adding the operator or parenthesis.
-            if current:
-                tokens.append(current)
-                current = ""
+        # Binary / arithmetic operators
+        if char in "+-*/%":
+            tokens.append(Token(TokenType.OPERATOR, char))
+            i += 1
+            continue
 
-            # store the operator or parenthesis as a separate token.
-            tokens.append(char)
+        # Numeric literal (integer or floating point)
+        if char.isdigit() or char == ".":
+            start = i
+            saw_dot = False
+            saw_digit = False
 
-        # ignore spaces and other whitespace characters.
-        elif char.isspace():
+            while i < n and (expression[i].isdigit() or expression[i] == "."):
+                if expression[i] == ".":
+                    if saw_dot:
+                        raise InvalidCodeException(f"Invalid decimal literal: {expression[start:i + 1]}")
+                    saw_dot = True
+                else:
+                    saw_digit = True
+                i += 1
 
-            # save the current number or variable when whitespace
-            # marks the end of the token.
-            if current:
-                tokens.append(current)
-                current = ""
+            if not saw_digit:
+                raise InvalidCodeException(f"Malformed number literal: {expression[start:i]}")
 
-        # reject characters that are not supported by the program.
-        else:
-            raise ValueError(f"Invalid character: {char}")
+            # If letters immediately follow digits without an operator, it's invalid
+            if i < n and expression[i].isalpha():
+                raise InvalidCodeException(f"Invalid token: {expression[start:i + 1]}")
 
-    # save the last number or variable after the loop ends.
-    if current:
-        tokens.append(current)
+            tokens.append(Token(TokenType.NUMBER, expression[start:i]))
+            continue
 
-    # return the complete list of tokens.
+        # Variable identifier
+        if char.isalpha():
+            start = i
+            i += 1
+            while i < n and expression[i].isalnum():
+                i += 1
+
+            # Underscores are explicitly prohibited by specification
+            if i < n and expression[i] == "_":
+                raise InvalidCodeException("Underscore not allowed in variable name")
+
+            var_name = expression[start:i]
+            tokens.append(Token(TokenType.VARIABLE, var_name))
+            continue
+
+        # Any other character is rejected as invalid input code
+        raise InvalidCodeException(f"Invalid character: {char}")
+
     return tokens
 
 
-# converts the tokenized infix expression into postfix notation
-# by arranging operands and operators according to precedence.
-def infix_to_postfix(tokens):
-    # this list stores the final postfix expression.
+# ==============================================================================
+# INFIX TO POSTFIX CONVERTER (SHUNTING-YARD ALGORITHM)
+# ==============================================================================
+
+def get_precedence(token: Token) -> int:
+    """Returns the operator precedence for a given token."""
+    if token.type == TokenType.UNARY_MINUS:
+        return 4
+    if token.text in ("*", "/", "%"):
+        return 3
+    if token.text in ("+", "-"):
+        return 2
+    return -1
+
+
+def is_left_associative(token: Token) -> bool:
+    """Returns whether the operator token is left-associative."""
+    # Unary minus is right-associative; binary operators are left-associative
+    return token.type != TokenType.UNARY_MINUS
+
+
+def infix_to_postfix(tokens: list) -> list:
+    """
+    Converts a list of infix tokens to postfix notation using Shunting-yard.
+    Properly differentiates between binary minus and unary minus.
+    """
     output = []
+    operator_stack = []
 
-    # this stack temporarily stores operators and parentheses.
-    operators = []
+    # True when an operand (number, variable, or unary sign) is expected next
+    expect_operand = True
 
-    # process each token from left to right.
     for token in tokens:
-
-        # numbers and variables are operands, so they can be
-        # added directly to the postfix output.
-        if token.replace(".", "", 1).isdigit() or token.isidentifier():
+        if token.type in (TokenType.NUMBER, TokenType.VARIABLE):
+            if not expect_operand:
+                raise InvalidCodeException(f"Unexpected operand: {token.text}")
             output.append(token)
+            expect_operand = False
 
-        # an opening parenthesis is placed on the operator stack
-        # until its matching closing parenthesis is encountered.
-        elif token == "(":
-            operators.append(token)
+        elif token.type == TokenType.LPAREN:
+            if not expect_operand:
+                raise InvalidCodeException("Unexpected '('")
+            operator_stack.append(token)
+            expect_operand = True
 
-        # a closing parenthesis means that operators inside
-        # the matching parentheses must be moved to the output.
-        elif token == ")":
+        elif token.type == TokenType.RPAREN:
+            if expect_operand:
+                raise InvalidCodeException("Unexpected ')'")
 
-            # move operators from the stack to the output
-            # until the matching opening parenthesis is found.
-            while operators and operators[-1] != "(":
-                output.append(operators.pop())
-
-            # if there is no opening parenthesis, the parentheses
-            # in the expression do not match.
-            if not operators:
-                raise ValueError("Mismatched parentheses")
-
-            # remove the opening parenthesis from the stack
-            # because parentheses are not included in postfix notation.
-            operators.pop()
-
-        # process supported mathematical operators.
-        elif token in "+-*/%":
-
-            # addition and subtraction have lower precedence.
-            if token in "+-":
-                current_precedence = 1
-
-            # multiplication, division, and modulo have higher precedence.
-            else:
-                current_precedence = 2
-
-            # compare the current operator with the operator
-            # currently at the top of the stack.
-            while operators and operators[-1] != "(":
-
-                # determine the precedence of the operator
-                # at the top of the stack.
-                if operators[-1] in "+-":
-                    stack_precedence = 1
-                else:
-                    stack_precedence = 2
-
-                # if the operator on the stack has higher or equal
-                # precedence, move it to the postfix output first.
-                if stack_precedence >= current_precedence:
-                    output.append(operators.pop())
-
-                # stop removing operators when the current operator
-                # has higher precedence.
-                else:
+            found_matching_lparen = False
+            while operator_stack:
+                top = operator_stack.pop()
+                if top.type == TokenType.LPAREN:
+                    found_matching_lparen = True
                     break
+                output.append(top)
 
-            # place the current operator on the operator stack.
-            operators.append(token)
+            if not found_matching_lparen:
+                raise InvalidCodeException("Mismatched parentheses")
 
-        # reject tokens that are not numbers, variables,
-        # parentheses, or supported operators.
+            expect_operand = False
+
+        elif token.type == TokenType.OPERATOR:
+            if expect_operand:
+                # Sign appearing where operand is expected -> unary operator
+                if token.text == "-":
+                    operator_stack.append(Token(TokenType.UNARY_MINUS, "-"))
+                    expect_operand = True
+                    continue
+                elif token.text == "+":
+                    # Unary plus: no-op, just keep expecting an operand
+                    expect_operand = True
+                    continue
+                else:
+                    raise InvalidCodeException(f"Unexpected operator '{token.text}'")
+
+            # Binary operator precedence comparison
+            while (
+                operator_stack
+                and operator_stack[-1].type != TokenType.LPAREN
+                and (
+                    get_precedence(operator_stack[-1]) > get_precedence(token)
+                    or (
+                        get_precedence(operator_stack[-1]) == get_precedence(token)
+                        and is_left_associative(token)
+                    )
+                )
+            ):
+                output.append(operator_stack.pop())
+
+            operator_stack.append(token)
+            expect_operand = True
+
         else:
-            raise ValueError(f"Invalid token: {token}")
+            raise InvalidCodeException(f"Unrecognized token: {token.text}")
 
-    # move all remaining operators from the stack to the output.
-    while operators:
+    # Expression cannot end expecting an operand (e.g. "5 +")
+    if expect_operand:
+        raise InvalidCodeException("Expression ends unexpectedly")
 
-        # an opening parenthesis still on the stack means
-        # that it does not have a matching closing parenthesis.
-        if operators[-1] == "(":
-            raise ValueError("Mismatched parentheses")
+    # Empty all remaining operators to the output
+    while operator_stack:
+        top = operator_stack.pop()
+        if top.type in (TokenType.LPAREN, TokenType.RPAREN):
+            raise InvalidCodeException("Mismatched parentheses")
+        output.append(top)
 
-        # move the remaining operator to the postfix output.
-        output.append(operators.pop())
+    if not output:
+        raise InvalidCodeException("Empty expression")
 
-    # return the completed postfix expression.
     return output
 
 
-# evaluates a postfix expression using a stack and the
-# currently stored values of variables.
-def evaluate_postfix(postfix, variables):
-    # this stack stores operands and intermediate results
-    # while the postfix expression is being evaluated.
-    stack = []
+def postfix_to_string(postfix_tokens: list) -> str:
+    """Formats a list of postfix tokens into a space-separated string."""
+    return " ".join(tok.display_text() for tok in postfix_tokens)
 
-    # process each token in the postfix expression from left to right.
-    for token in postfix:
 
-        # check if the token is a number, including decimal numbers.
-        if token.replace(".", "", 1).isdigit():
+# ==============================================================================
+# POSTFIX EVALUATOR
+# ==============================================================================
 
-            # convert the number from a string to a floating-point value
-            # and place it on the evaluation stack.
-            stack.append(float(token))
+def format_number(value: float) -> str:
+    """Formats a numeric value: whole numbers are displayed without trailing decimal point."""
+    if value != value or value in (float("inf"), float("-inf")):
+        return str(value)
+    if value == int(value):
+        return str(int(value))
+    return str(value)
 
-        # check if the token is a variable name.
-        elif token.isidentifier():
 
-            # a variable must have been assigned a value before
-            # it can be used in an expression.
-            if token not in variables:
-                raise ValueError(
-                    f"Undefined variable: {token}"
-                )
+def evaluate_postfix(postfix_tokens: list, variables: dict) -> float:
+    """
+    Evaluates a postfix token list using an evaluation stack and the current variables map.
+    Raises UndefinedVariableException, DivisionByZeroException, or InvalidCodeException.
+    """
+    eval_stack = []
 
-            # get the most recently stored value of the variable
-            # and place it on the evaluation stack.
-            stack.append(variables[token])
+    for token in postfix_tokens:
+        if token.type == TokenType.NUMBER:
+            eval_stack.append(float(token.text))
 
-        # process mathematical operators.
-        elif token in "+-*/%":
+        elif token.type == TokenType.VARIABLE:
+            var_name = token.text
+            if var_name not in variables:
+                raise UndefinedVariableException(var_name)
+            eval_stack.append(variables[var_name])
 
-            # every supported operator is binary, meaning it needs
-            # two operands to perform an operation.
-            if len(stack) < 2:
-                raise ValueError("Invalid expression")
+        elif token.type == TokenType.UNARY_MINUS:
+            if not eval_stack:
+                raise InvalidCodeException("Malformed unary minus expression")
+            operand = eval_stack.pop()
+            eval_stack.append(-operand)
 
-            # the first value removed from the stack is
-            # the right operand.
-            right = stack.pop()
+        elif token.type == TokenType.OPERATOR:
+            if len(eval_stack) < 2:
+                raise InvalidCodeException("Malformed operator expression")
+            right = eval_stack.pop()
+            left = eval_stack.pop()
 
-            # the second value removed is the left operand.
-            left = stack.pop()
-
-            # perform addition.
-            if token == "+":
-                result = left + right
-
-            # perform subtraction.
-            elif token == "-":
-                result = left - right
-
-            # perform multiplication.
-            elif token == "*":
-                result = left * right
-
-            # perform division.
-            elif token == "/":
-
-                # division by zero is not allowed.
+            if token.text == "+":
+                eval_stack.append(left + right)
+            elif token.text == "-":
+                eval_stack.append(left - right)
+            elif token.text == "*":
+                eval_stack.append(left * right)
+            elif token.text == "/":
                 if right == 0:
-                    raise ZeroDivisionError(
-                        "Division by zero"
-                    )
-
-                # calculate the division result.
-                result = left / right
-
-            # perform modulo.
-            elif token == "%":
-
-                # modulo by zero is not allowed.
+                    raise DivisionByZeroException()
+                eval_stack.append(left / right)
+            elif token.text == "%":
                 if right == 0:
-                    raise ZeroDivisionError(
-                        "Modulo by zero"
-                    )
+                    raise DivisionByZeroException()
+                eval_stack.append(left % right)
+            else:
+                raise InvalidCodeException(f"Unknown operator: {token.text}")
 
-                # calculate the modulo result.
-                result = left % right
-
-            # place the calculated result back onto the stack
-            # so it can be used by the next operator.
-            stack.append(result)
-
-        # reject any token that is not recognized.
         else:
-            raise ValueError(f"Invalid token: {token}")
+            raise InvalidCodeException(f"Unexpected token in evaluation: {token.text}")
 
-    # a valid postfix expression must leave exactly one
-    # final result on the stack.
-    if len(stack) != 1:
-        raise ValueError("Invalid expression")
+    if len(eval_stack) != 1:
+        raise InvalidCodeException("Invalid expression structure")
 
-    # return the final evaluated result.
-    return stack.pop()
+    return eval_stack.pop()
 
 
-# processes one complete input line by determining whether
-# it is an assignment or an expression, then tokenizing,
-# converting, evaluating, and storing the result when needed.
-def process_line(line, variables):
+# ==============================================================================
+# INPUT PROCESSING AND OUTPUT BUILDER
+# ==============================================================================
 
-    # remove unnecessary whitespace from the beginning and end
-    # of the input line.
-    line = line.strip()
+class LineRecord:
+    """Holds information for each processed line of input."""
+    def __init__(self, original_line: str, postfix_str: str, result_str: str):
+        self.original_line = original_line
+        self.postfix_str = postfix_str
+        self.result_str = result_str
 
-    # reject an input line that contains no code.
-    if not line:
-        raise ValueError("Empty input")
 
-    # check whether the input line contains an assignment operator.
-    if "=" in line:
+class ExpressionEngine:
+    """
+    Orchestrates the processing of the entire input text, maintains the variable symbol table,
+    and formats the final output according to the program specifications.
+    """
+    def __init__(self):
+        self.variables = OrderedDict()
+        self.line_records = []
+        self.errors = []
 
-        # an assignment must contain exactly one equals sign.
-        if line.count("=") != 1:
-            raise ValueError("Invalid assignment")
+    def process_all(self, input_text: str):
+        """Processes each non-empty line of the input text."""
+        raw_lines = input_text.splitlines()
+        for raw_line in raw_lines:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            self._process_single_line(raw_line, stripped)
 
-        # separate the target variable from the expression.
-        target, expression = line.split("=", 1)
+    def _process_single_line(self, original_line: str, line: str):
+        target_var = None
 
-        # remove unnecessary spaces around the target variable.
-        target = target.strip()
+        # Check for assignment statement
+        eq_index = line.find("=")
+        if eq_index >= 0:
+            left_part = line[:eq_index].strip()
+            expr_part = line[eq_index + 1:].strip()
 
-        # remove unnecessary spaces around the expression.
-        expression = expression.strip()
+            if not is_valid_variable_name(left_part):
+                self.errors.append("Invalid input code")
+                self.line_records.append(
+                    LineRecord(original_line, "N/A", "Error: Invalid input code")
+                )
+                return
 
-        # make sure the target follows the required
-        # variable naming format.
-        if not target.isidentifier():
-            raise ValueError(
-                f"Invalid variable name: {target}"
+            target_var = left_part
+        else:
+            expr_part = line
+
+        if not expr_part:
+            self.errors.append("Invalid input code")
+            self.line_records.append(
+                LineRecord(original_line, "N/A", "Error: Invalid input code")
+            )
+            return
+
+        # Tokenize and convert to postfix
+        try:
+            tokens = get_tokens(expr_part)
+            postfix_tokens = infix_to_postfix(tokens)
+        except InvalidCodeException:
+            self.errors.append("Invalid input code")
+            self.line_records.append(
+                LineRecord(original_line, "N/A", "Error: Invalid input code")
+            )
+            return
+
+        postfix_str = postfix_to_string(postfix_tokens)
+
+        # Evaluate the postfix expression
+        try:
+            val = evaluate_postfix(postfix_tokens, self.variables)
+            formatted_val = format_number(val)
+
+            if target_var is not None:
+                self.variables[target_var] = val
+                result_str = f"{target_var} = {formatted_val}"
+            else:
+                result_str = formatted_val
+
+            self.line_records.append(LineRecord(original_line, postfix_str, result_str))
+
+        except UndefinedVariableException as e:
+            self.errors.append(str(e))
+            if target_var is not None:
+                result_str = f"{target_var} = Error: {e}"
+            else:
+                result_str = f"Error: {e}"
+            self.line_records.append(LineRecord(original_line, postfix_str, result_str))
+
+        except DivisionByZeroException as e:
+            self.errors.append(str(e))
+            if target_var is not None and target_var in self.variables:
+                # If target variable already had a value prior to division by zero, it retains that value
+                prev_val = format_number(self.variables[target_var])
+                result_str = f"{target_var} = {prev_val} (retained previous value)"
+            elif target_var is not None:
+                result_str = f"{target_var} = Error: {e}"
+            else:
+                result_str = f"Error: {e}"
+            self.line_records.append(LineRecord(original_line, postfix_str, result_str))
+
+        except InvalidCodeException:
+            self.errors.append("Invalid input code")
+            self.line_records.append(
+                LineRecord(original_line, postfix_str, "Error: Invalid input code")
             )
 
-        # an assignment must contain an expression after the equals sign.
-        if not expression:
-            raise ValueError("Missing expression")
+    def build_output(self) -> str:
+        """
+        Builds the formatted output text:
+        - Line/Postfix/Result for each input code separated by empty lines.
+        - Section for variables used with their final values.
+        - Section for all errors found.
+        """
+        output_lines = []
 
-    else:
+        # Output per input line
+        for rec in self.line_records:
+            output_lines.append(f"Line: {rec.original_line.strip()}")
+            output_lines.append(f"Postfix: {rec.postfix_str}")
+            output_lines.append(f"Result: {rec.result_str}")
+            output_lines.append("")
 
-        # if there is no equals sign, the input is an expression only.
-        # there is no target variable to store the result in.
-        target = None
+        # Variables used section
+        output_lines.append("-------------------------------------------")
+        output_lines.append("Variables used:")
+        if not self.variables:
+            output_lines.append("(none)")
+        else:
+            for var_name, var_val in self.variables.items():
+                output_lines.append(f"{var_name} = {format_number(var_val)}")
 
-        # use the entire input line as the expression.
-        expression = line
+        # Errors found section
+        output_lines.append("-------------------------------------------")
+        output_lines.append("Errors found:")
+        if not self.errors:
+            output_lines.append("(none)")
+        else:
+            for err in self.errors:
+                output_lines.append(err)
 
-    # convert the expression into a list of tokens.
-    tokens = get_tokens(expression)
-
-    # reject an expression that produced no tokens.
-    if not tokens:
-        raise ValueError("Invalid expression")
-
-    # convert the infix tokens into postfix notation.
-    postfix = infix_to_postfix(tokens)
-
-    # evaluate the postfix expression using the current
-    # values stored in the variables dictionary.
-    result = evaluate_postfix(postfix, variables)
-
-    # store the result only after the expression has been
-    # successfully evaluated.
-    #
-    # this ensures that an error such as division by zero
-    # does not overwrite a variable's previous value.
-    if target is not None:
-        variables[target] = result
-
-    # return both the postfix expression and evaluated result
-    # so they can be displayed by the main program or GUI.
-    return postfix, result
+        return "\n".join(output_lines) + "\n"
 
 
-# contains the main program flow for receiving and processing
-# expressions and assignment statements.
-def main():
+# ==============================================================================
+# GRAPHICAL USER INTERFACE (TKINTER)
+# ==============================================================================
 
-    # create a dictionary to store the current value
-    # of every assigned variable.
-    variables = {}
+class ExpressionEvaluatorApp(tk.Tk):
+    """
+    Main GUI application containing:
+    - Input text area (editable)
+    - Output text area (non-editable)
+    - Load File button (.in files only)
+    - Process button (triggers evaluation if input is not empty)
+    """
+    def __init__(self):
+        super().__init__()
+        self.title("PE00 - Expression Evaluation")
+        self.geometry("900x620")
+        self.minsize(700, 500)
+        self._build_ui()
 
-    # display the program title and basic instructions.
-    print("Expression Processor")
-    print("--------------------")
-    print("Enter an expression or assignment.")
-    print("Press ENTER on an empty line to stop.")
-    print()
+    def _build_ui(self):
+        container = tk.Frame(self, padx=10, pady=10)
+        container.pack(fill=tk.BOTH, expand=True)
 
-    # continuously ask the user for input until
-    # an empty line is entered.
-    while True:
+        panes = tk.PanedWindow(container, orient=tk.HORIZONTAL, sashwidth=6)
+        panes.pack(fill=tk.BOTH, expand=True)
 
-        # read one complete input line from the user.
-        line = input("Enter code: ")
+        # Left Frame: Input lines
+        input_frame = tk.LabelFrame(panes, text="Input lines:", font=("Arial", 10, "bold"))
+        self.input_area = scrolledtext.ScrolledText(
+            input_frame, wrap=tk.NONE, font=("Courier New", 11), undo=True
+        )
+        self.input_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        panes.add(input_frame, stretch="always")
 
-        # stop the program when the user enters
-        # an empty or whitespace-only line.
-        if not line.strip():
-            break
+        # Right Frame: Output
+        output_frame = tk.LabelFrame(panes, text="Output:", font=("Arial", 10, "bold"))
+        self.output_area = scrolledtext.ScrolledText(
+            output_frame, wrap=tk.NONE, font=("Courier New", 11), state=tk.DISABLED
+        )
+        self.output_area.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        panes.add(output_frame, stretch="always")
+
+        # Bottom Frame: Action Buttons
+        button_frame = tk.Frame(container)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+
+        load_button = tk.Button(
+            button_frame,
+            text="Load File",
+            font=("Arial", 10, "bold"),
+            command=self.on_load_file,
+            height=2,
+            cursor="hand2"
+        )
+        load_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        process_button = tk.Button(
+            button_frame,
+            text="Process",
+            font=("Arial", 10, "bold"),
+            command=self.on_process,
+            height=2,
+            cursor="hand2"
+        )
+        process_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+
+    def on_load_file(self):
+        """
+        Loads input code from an external .in file from any directory.
+        Overwrites whatever is currently on the input text area.
+        """
+        file_path = filedialog.askopenfilename(
+            title="Open Input File (.in)",
+            filetypes=[("Input Files", "*.in"), ("All Files", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        # Strictly enforce .in extension per specification
+        if not file_path.lower().endswith(".in"):
+            messagebox.showerror(
+                "Invalid File Extension",
+                "Only files with a .in extension can be loaded."
+            )
+            return
 
         try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            messagebox.showerror("Error Reading File", f"Could not read file:\n{e}")
+            return
 
-            # process the input line and receive
-            # its postfix expression and result.
-            postfix, result = process_line(
-                line,
-                variables
-            )
+        # Overwrite input text area
+        self.input_area.delete("1.0", tk.END)
+        self.input_area.insert(tk.END, content)
 
-            # display the postfix representation of the expression.
-            print("Postfix:", " ".join(postfix))
+    def on_process(self):
+        """
+        Processes the input code from the input text area.
+        Only runs if the input text area is not empty.
+        Overwrites whatever is currently on the output text area.
+        """
+        input_content = self.input_area.get("1.0", tk.END)
 
-            # display the evaluated result.
-            print("Result:", result)
+        # "The Process button should only work if the designated text area for the input is not empty."
+        if not input_content.strip():
+            return
 
-            # display the variables and their most recently
-            # assigned values.
-            print("Variables:", variables)
+        engine = ExpressionEngine()
+        engine.process_all(input_content)
+        output_result = engine.build_output()
 
-        # handle division-by-zero and modulo-by-zero errors.
-        except ZeroDivisionError as error:
+        # Overwrite output text area
+        self.output_area.config(state=tk.NORMAL)
+        self.output_area.delete("1.0", tk.END)
+        self.output_area.insert(tk.END, output_result)
+        self.output_area.config(state=tk.DISABLED)
 
-            # display the evaluation error without stopping
-            # the entire program.
-            print("Evaluation Error:", error)
 
-        # handle invalid expressions, variables, tokens,
-        # assignments, and parentheses.
-        except ValueError as error:
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
 
-            # display the expression-related error without
-            # stopping the entire program.
-            print("Expression Error:", error)
+def main():
+    """Starts the Expression Evaluation GUI application."""
+    app = ExpressionEvaluatorApp()
+    app.mainloop()
 
-        # print an empty line to separate each input's output.
-        print()
 
-# start the main program.
-main()
+if __name__ == "__main__":
+    main()
